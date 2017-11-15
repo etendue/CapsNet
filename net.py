@@ -1,6 +1,7 @@
 import tensorflow as tf
 from tensorflow.examples.tutorials.mnist import input_data
-
+from tqdm import tqdm
+from tensorflow.python.client import timeline
 
 def squash(cap_input):
     with tf.name_scope('SQUASH'):
@@ -13,7 +14,6 @@ def squash(cap_input):
 
 def dynamic_routing(u_ij):
     '''
-
     :param u_ij: [None,1152,10,16]
     :return:
     '''
@@ -21,7 +21,6 @@ def dynamic_routing(u_ij):
         # Prior [10,1152]
         b_IJ = tf.get_variable('b_IJ', [1152,10], dtype=tf.float32, initializer=tf.zeros_initializer(),
                                trainable=False)
-
 
         def update_prior(iter,b_IJ,u_ij,vj):
             c_IJ = tf.nn.softmax(b_IJ, dim=0, name="c_IJ")
@@ -48,29 +47,28 @@ def dynamic_routing(u_ij):
 
     return vj
 
-tf.reset_default_graph()
-graph = tf.get_default_graph()
+graph = tf.Graph()
 
 with graph.as_default():
 
     with tf.variable_scope("INPUT"):
         X = tf.placeholder(tf.float32, [None, 784], name="X")
-        X_img = tf.reshape(X,[-1,28,28])
+        X_img = tf.reshape(X,[-1,28,28,1])
         y = tf.placeholder(tf.int32, (None), name="y")
         y_onehot = tf.one_hot(y, 10,dtype=tf.float32)
 
     with tf.variable_scope("CONV1"):
-        conv1 = tf.contrib.layers.conv2d(X_img, 256, kernel_size=9, stride=1, padding='VALID')
-        conv1 = tf.identity(conv1, name="CONV1")
+        conv1 = tf.layers.conv2d(X_img,256,kernel_size=9,strides=1,padding='valid',name="CONV1")
+        conv3 = tf.layers.conv2d(X_img, 2, kernel_size=3, strides=1, padding='valid', name="CONV3")
 
     with tf.variable_scope("PRIMARY_CAP"):
-        conv2 = tf.contrib.layers.conv2d(conv1, 256, kernel_size=9, stride=2, padding='VALID')
+        conv2 = tf.layers.conv2d(conv1,256,kernel_size=9,strides=2,padding='valid',name="CONV2")
         # [None, 6*6*256]
         conv2 = tf.identity(conv2, name="CONV2")
         # [None, 1152,1,8]
         u_I = squash(tf.reshape(conv2, (-1, 1152,1,8)))
 
-    with tf.variable_scope("ROUTING"):
+    with tf.variable_scope("TRANSFORMATION"):
         W_JI = tf.get_variable('W_JI', [10,1152,8,16], dtype=tf.float32, initializer=tf.random_normal_initializer())
         # [None,10,1152,1,16]
         u_JI = tf.map_fn(lambda ui: tf.map_fn(lambda wi:tf.matmul(ui,wi), W_JI),u_I)
@@ -84,10 +82,11 @@ with graph.as_default():
     with tf.variable_scope("COST"):
         # [None,10]
         vj_norm = tf.norm(vj, ord=2, axis=-1,name='digit_caps_norm')
-        los_true = tf.square(tf.maximum(0., 0.9 -vj_norm ))
-        los_false = tf.square(tf.maximum(0., vj_norm - 0.1))
-        loss = y_onehot * los_true + 0.5 * (1 - y_onehot) * los_false
+        loss_p = tf.square(tf.maximum(0., 0.9 -vj_norm ))
+        loss_n = tf.square(tf.maximum(0., vj_norm - 0.1))
+        loss = y_onehot * loss_p + 0.5 * (1 - y_onehot) * loss_n
         margin_loss = tf.reduce_mean(tf.reduce_sum(loss, axis=-1))
+        tf.summary.scalar("margin_loss",margin_loss)
 
     with tf.variable_scope("TRAIN"):
         train_op = tf.train.AdamOptimizer().minimize(margin_loss)
@@ -95,11 +94,38 @@ with graph.as_default():
     with tf.variable_scope("TEST"):
         predictions = tf.argmax(vj_norm, axis=-1, output_type=tf.int32)
         accuracy = tf.reduce_mean(tf.cast(tf.equal(y, predictions), tf.float32))
+        tf.summary.scalar("accuracy",accuracy)
 
+    summary_merge = tf.summary.merge_all()
 
+batch_size = 32
+epochs = 10
+batch_num = 100
 mnist = input_data.read_data_sets('data/',one_hot=False)
-with tf.Session() as sess:
+
+summary_writer = tf.summary.FileWriter('logs/',graph)
+
+run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
+run_metadata = tf.RunMetadata()
+with tf.Session(graph=graph) as sess:
     sess.run(tf.global_variables_initializer())
-    train_X,train_y = mnist.train.next_batch(16)
-    print(len(train_X))
-    sess.run([conv1],feed_dict={X:train_X,y:train_y})
+    print('trainable variables count: %d' % sum(v.get_shape().num_elements() for v in tf.trainable_variables()))
+
+    for i in tqdm(range(batch_num*epochs),total=batch_num*epochs,unit='batches',desc="training"):
+        train_X,train_y = mnist.train.next_batch(batch_size)
+        _,loss = sess.run([train_op, margin_loss],feed_dict={X:train_X,y:train_y})
+
+        if i%batch_num == 0:
+            test_X,test_y = mnist.validation.next_batch(1024)
+            _,precision, val_loss = sess.run([train_op,accuracy, margin_loss], feed_dict={X: train_X, y: train_y})
+            #tl = timeline.Timeline(run_metadata.step_stats)
+            #ctf = tl.generate_chrome_trace_format()
+            #with open('timeline.json', 'w') as f:
+            #    f.write(ctf)
+            # print("test accurary:{} loss:{}, train loss:{}".format(precision,val_loss,loss))
+
+        if i%16 == 0:
+            summary,_, precision, val_loss = sess.run([summary_merge,train_op, accuracy, margin_loss], feed_dict={X: train_X, y: train_y},
+                                              options=run_options, run_metadata=run_metadata)
+            # summary_writer.add_run_metadata(run_metadata, 'step%d' % i,i)
+            summary_writer.add_summary(summary,i)
