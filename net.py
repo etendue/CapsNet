@@ -52,19 +52,39 @@ graph = tf.Graph()
 with graph.as_default():
 
     with tf.variable_scope("INPUT"):
-        X = tf.placeholder(tf.float32, [None, 784], name="X")
-        X_img = tf.reshape(X,[-1,28,28,1])
+        X = tf.placeholder(tf.float32, [32, 784], name="X")
+        X_img = tf.reshape(X,[32,28,28,1])
         y = tf.placeholder(tf.int32, (None), name="y")
         y_onehot = tf.one_hot(y, 10,dtype=tf.float32)
+        img_summary = tf.slice(X_img,[0,0,0,0],[4,28,28,1])
+        img_summary = tf.split(img_summary,4,0)
+        img_summary = tf.concat(img_summary,1)
+        img_summary = tf.squeeze(img_summary,0)
+
+        img_summary = tf.split(img_summary,2)
+        img_summary = tf.concat(img_summary,axis=1)
+        img_summary = tf.expand_dims(img_summary,axis=0)
+        tf.summary.image("orignal_img",img_summary,1)
 
     with tf.variable_scope("CONV1"):
-        conv1 = tf.layers.conv2d(X_img,256,kernel_size=9,strides=1,padding='valid',name="CONV1")
-        conv3 = tf.layers.conv2d(X_img, 2, kernel_size=3, strides=1, padding='valid', name="CONV3")
+        #conv1 = tf.layers.conv2d(X_img,256,kernel_size=9,strides=1,padding='valid',name="CONV1")
+        #conv1 = tf.contrib.layers.conv2d(X_img, 256, kernel_size=9, stride=1, padding='valid')
+
+        conv1_w = tf.get_variable('conv1_w', shape=[9, 9, 1, 256], dtype=tf.float32)
+        conv1 = tf.nn.conv2d(X_img, conv1_w, [1, 1, 1, 1],padding='VALID', name='conv1')
+        summary_w = tf.transpose(conv1_w,[3,0,1,2])
+        summary_w = tf.split(summary_w,256,0)
+        summary_w = tf.concat(summary_w,1)
+        summary_w = tf.squeeze(summary_w,0)
+        print(summary_w)
+        summary_w = tf.split(summary_w,16)
+        summary_w = tf.concat(summary_w,axis=1)
+        summary_w = tf.expand_dims(summary_w,0)
+        tf.summary.image("conv1_w",summary_w,1)
 
     with tf.variable_scope("PRIMARY_CAP"):
-        conv2 = tf.layers.conv2d(conv1,256,kernel_size=9,strides=2,padding='valid',name="CONV2")
         # [None, 6*6*256]
-        conv2 = tf.identity(conv2, name="CONV2")
+        conv2 = tf.layers.conv2d(conv1,256,kernel_size=9,strides=2,padding='valid',name="CONV2")
         # [None, 1152,1,8]
         u_I = squash(tf.reshape(conv2, (-1, 1152,1,8)))
 
@@ -100,32 +120,23 @@ with graph.as_default():
 
 batch_size = 32
 epochs = 10
-batch_num = 100
+epoch_size = 4
 mnist = input_data.read_data_sets('data/',one_hot=False)
 
 summary_writer = tf.summary.FileWriter('logs/',graph)
 
-run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
-run_metadata = tf.RunMetadata()
+#run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
+#run_metadata = tf.RunMetadata()
 with tf.Session(graph=graph) as sess:
     sess.run(tf.global_variables_initializer())
     print('trainable variables count: %d' % sum(v.get_shape().num_elements() for v in tf.trainable_variables()))
 
-    for i in tqdm(range(batch_num*epochs),total=batch_num*epochs,unit='batches',desc="training"):
+    for i in tqdm(range(epoch_size*epochs),total=epoch_size*epochs,unit='batches',desc="training"):
         train_X,train_y = mnist.train.next_batch(batch_size)
         _,loss = sess.run([train_op, margin_loss],feed_dict={X:train_X,y:train_y})
 
-        if i%batch_num == 0:
-            test_X,test_y = mnist.validation.next_batch(1024)
-            _,precision, val_loss = sess.run([train_op,accuracy, margin_loss], feed_dict={X: train_X, y: train_y})
-            #tl = timeline.Timeline(run_metadata.step_stats)
-            #ctf = tl.generate_chrome_trace_format()
-            #with open('timeline.json', 'w') as f:
-            #    f.write(ctf)
-            # print("test accurary:{} loss:{}, train loss:{}".format(precision,val_loss,loss))
+        if i%epoch_size == 0:
+            test_X,test_y = mnist.validation.next_batch(batch_size)
+            summary = sess.run(summary_merge, feed_dict={X: test_X, y: test_y})
+            summary_writer.add_summary(summary, i)
 
-        if i%16 == 0:
-            summary,_, precision, val_loss = sess.run([summary_merge,train_op, accuracy, margin_loss], feed_dict={X: train_X, y: train_y},
-                                              options=run_options, run_metadata=run_metadata)
-            # summary_writer.add_run_metadata(run_metadata, 'step%d' % i,i)
-            summary_writer.add_summary(summary,i)
